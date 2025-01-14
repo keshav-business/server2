@@ -19,7 +19,7 @@ from langchain.chains import ConversationalRetrievalChain
 import openai
 import tempfile
 import logging
-
+from openai import OpenAI
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -179,6 +179,11 @@ def generate_questions(chain, num_questions: int = 5) -> List[Question]:
 async def startup_event():
     initialize_vectorstore()
 
+
+
+# Initialize the client once at the module level
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
 @app.post("/transcribe-audio")
 async def transcribe_audio(
     audio_file: UploadFile = File(...),
@@ -192,18 +197,17 @@ async def transcribe_audio(
             temp_audio.write(content)
             temp_audio.flush()
             
-            # Open the file and send to Whisper API
+            # Open the file and send to Whisper API using new client format
             with open(temp_audio.name, 'rb') as audio:
-                transcript = openai.Audio.transcribe(
+                transcript = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=audio,
-                    response_format="text"
+                    file=audio
                 )
         
         # Clean up temporary file
         os.unlink(temp_audio.name)
         
-        return {"text": transcript}
+        return {"text": transcript.text}
         
     except Exception as e:
         logger.error(f"Error in audio transcription: {str(e)}")
@@ -211,7 +215,6 @@ async def transcribe_audio(
             status_code=500,
             detail="Error processing audio transcription"
         )
-
 @app.post("/quiz/start")
 async def start_quiz(session: dict = Depends(get_session)):
     session_data = session['data']
