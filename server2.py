@@ -243,23 +243,41 @@ async def submit_answer(
     answer: QuizAnswer,
     session: dict = Depends(get_session)
 ):
+    logger.info(f"Received answer - quiz_id: {quiz_id}, question_id: {question_id}")
+    
+    # Validate UUID format
+    try:
+        uuid.UUID(quiz_id)
+        uuid.UUID(question_id)
+    except ValueError:
+        logger.error(f"Invalid UUID format - quiz_id: {quiz_id}, question_id: {question_id}")
+        raise HTTPException(status_code=400, detail="Invalid quiz or question ID format")
+    
     session_data = session['data']
     quiz = session_data['active_quizzes'].get(quiz_id)
     
     if not quiz:
+        logger.error(f"Quiz not found - quiz_id: {quiz_id}")
+        logger.debug(f"Active quizzes: {list(session_data['active_quizzes'].keys())}")
         raise HTTPException(status_code=404, detail="Quiz not found")
+    
+    # Validate question exists in quiz
+    if not any(q.id == question_id for q in quiz["questions"]):
+        logger.error(f"Question not found in quiz - question_id: {question_id}")
+        raise HTTPException(status_code=404, detail="Question not found in quiz")
     
     quiz["answers"][question_id] = answer.user_answer
     quiz["current_question"] += 1
     
     quiz_complete = quiz["current_question"] >= len(quiz["questions"])
     
+    logger.info(f"Answer processed - quiz_complete: {quiz_complete}")
+    
     return {
         "status": "success",
         "quiz_complete": quiz_complete,
         "stored_answer": answer.user_answer
     }
-
 @app.get("/quiz/{quiz_id}/result")
 async def get_quiz_result(quiz_id: str, session: dict = Depends(get_session)):
     session_data = session['data']
