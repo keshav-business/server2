@@ -8,7 +8,7 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import base64
 import requests
-
+from thefuzz import fuzz, process
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
+from langchain.chains import ConversationalRetrievalChain, LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.chains.question_answering import load_qa_chain
 
@@ -169,12 +169,6 @@ def initialize_global_vectorstore():
 def create_or_refresh_user_chain(user_id: str):
     """
     Creates or refreshes a user's conversation chain with semantic understanding and fuzzy matching capabilities.
-    
-    Args:
-        user_id (str): The unique identifier for the user
-        
-    Returns:
-        Tuple[bool, str]: Success status and message
     """
     user_state = get_user_state(user_id)
     if user_state['chain'] is None:
@@ -188,60 +182,24 @@ def create_or_refresh_user_chain(user_id: str):
         # Create chat model with system message
         chat_llm = ChatOpenAI(model=MODEL_NAME, temperature=0.7)
         
-        # Create semantic understanding chain with fuzzy matching awareness
-        semantic_template = """Given a potentially misheard or incorrectly transcribed question, understand the true intent and rephrase it clearly.
-        Consider both semantic meaning and similar-sounding words.
-        
-        Original question: {question}
-        Fuzzy matched terms: {fuzzy_matches}
-        
-        Instructions:
-        1. Analyze the question for potential speech recognition errors
-        2. Consider the semantic meaning and context
-        3. Review the fuzzy matched terms for potential corrections
-        4. If the question seems correct, return it unchanged
-        5. If there are likely errors, return the most probable intended question
-        
-        Rephrase if needed, preserve original if clear.
-        
-        Corrected question:"""
-        
-        SEMANTIC_PROMPT = PromptTemplate(
-            template=semantic_template,
-            input_variables=["question", "fuzzy_matches"]
+        # Update memory configuration to specify output key
+        memory = ConversationBufferMemory(
+            memory_key='chat_history',
+            return_messages=True,
+            output_key='answer'  # Specify which key to store in memory
         )
+        user_state['memory'] = memory  # Update the user's memory instance
         
-        semantic_chain = LLMChain(
-            llm=chat_llm,
-            prompt=SEMANTIC_PROMPT,
-            output_parser=StrOutputParser(),
-        )
-
-        # Create conversational chain for handling follow-up questions
-        condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
-        Consider both semantic meaning and similar-sounding words.
-        
-        Chat History:
-        {chat_history}
-        Follow Up Input: {question}
-        Standalone question:"""
-        
-        CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(condense_template)
-
         # Create QA prompt template with system message
         qa_template = f"""
         {user_state['system_message']}
 
-        Instructions:
-        - Focus on the intent and meaning of the question
-        - Consider contextual relevance and similar terms
-        - Provide accurate information based on available context
-        - If uncertain about specific details, acknowledge the uncertainty
-        - Maintain consistency with previous responses in the conversation
-        
         Context: {{context}}
         Question: {{question}}
         
+        Answer in a helpful and natural way. If the answer cannot be found in the context, 
+        say so politely instead of making assumptions. Keep answers under 50 words unless more detail is necessary.
+
         Answer:"""
         
         QA_PROMPT = PromptTemplate(
@@ -249,39 +207,51 @@ def create_or_refresh_user_chain(user_id: str):
             input_variables=["context", "question"]
         )
 
-        # Configure retriever with enhanced search parameters
-        retriever = global_vectorstore.as_retriever(
-            search_type="similarity_score_threshold",
-            search_kwargs={
-                "k": 4,                    # Number of documents to return
-                "score_threshold": 0.5,    # Minimum similarity score
-                "fetch_k": 6,              # Number of documents to initially fetch for filtering
-                "lambda_mult": 0.5         # Diversity factor for results
-            }
-        )
-
-        # Create main conversation chain
+        # Create conversation chain
         conversation_chain = ConversationalRetrievalChain.from_llm(
             llm=chat_llm,
-            retriever=retriever,
-            memory=user_state['memory'],
-            condense_question_prompt=CONDENSE_QUESTION_PROMPT,
-            combine_docs_chain_kwargs={'prompt': QA_PROMPT},
-            verbose=True,
-            return_source_documents=True,  # Include source documents in response
-            max_tokens_limit=4000          # Limit token usage
+            retriever=global_vectorstore.as_retriever(
+                search_type="similarity_score_threshold",
+                search_kwargs={
+                    "k": 4,
+                    "score_threshold": 0.5,
+                    "fetch_k": 6
+                }
+            ),
+            memory=memory,
+            return_source_documents=True,
+            combine_docs_chain_kwargs={'prompt': QA_PROMPT}
         )
 
-        # Store chains and corpus in user state
+        # Store chain in user state
         user_state['chain'] = conversation_chain
-        user_state['semantic_chain'] = semantic_chain
         
-        # Log creation of new chain
-        logger.info(f"New conversation chain created for user {user_id} with fuzzy matching and semantic understanding")
-        return True, "Enhanced conversation chain created successfully."
+        logger.info(f"New conversation chain created for user {user_id}")
+        return True, "Conversation chain created successfully."
     else:
-        # Chain already exists
         return True, "Conversation chain already exists and is ready to use."
+    
+def handle_userinput(user_question: str, user_id: str):
+    user_state = get_user_state(user_id)
+    conversation_chain = user_state['chain']
+    
+    if not conversation_chain:
+        return None
+
+    try:
+        input_data = {'question': user_question}
+        response = conversation_chain(input_data)
+        answer = response['answer']
+
+        user_state['history'].append((user_question, answer))
+        log_event("UserQuestion", f"Q: {user_question}", user_id=user_id)
+        log_event("AIAnswer", f"A: {answer}", user_id=user_id)
+
+        return {'text': answer}
+    except Exception as e:
+        logger.error(f"Error processing question: {e}")
+        return {'text': "I apologize, but I encountered an error processing your question. Please try again."}
+    
 def get_fuzzy_matches(word: str, word_list: list[str], threshold: int = 80) -> list[tuple[str, int]]:
     """
     Find fuzzy matches for a word in a word list.
@@ -319,52 +289,6 @@ def process_with_fuzzy_matching(question: str, fuzzy_corpus: list[str]) -> tuple
             })
     
     return question, fuzzy_matches
-
-def handle_userinput(user_question: str, user_id: str):
-    user_state = get_user_state(user_id)
-    conversation_chain = user_state['chain']
-    semantic_chain = user_state['semantic_chain']
-    fuzzy_corpus = user_state.get('fuzzy_corpus', [])
-    
-    if not conversation_chain or not semantic_chain:
-        return None
-
-    try:
-        # Process with fuzzy matching
-        _, fuzzy_matches = process_with_fuzzy_matching(user_question, fuzzy_corpus)
-        
-        # Convert fuzzy matches to string for prompt
-        fuzzy_matches_str = str(fuzzy_matches) if fuzzy_matches else "No similar terms found"
-        
-        # Process through semantic understanding with fuzzy matches
-        processed_question = semantic_chain.run(
-            question=user_question,
-            fuzzy_matches=fuzzy_matches_str
-        )
-        
-        # Log the processing steps
-        log_event(
-            "QuestionProcessing",
-            f"Original: {user_question} | Fuzzy Matches: {fuzzy_matches_str} | Processed: {processed_question}",
-            user_id=user_id
-        )
-
-        input_data = {'question': processed_question}
-        response = conversation_chain(input_data)
-        answer = response['answer']
-
-        user_state['history'].append((user_question, answer))
-        log_event("UserQuestion", f"Q: {user_question}", user_id=user_id)
-        log_event("AIAnswer", f"A: {answer}", user_id=user_id)
-
-        return {'text': answer}
-    except Exception as e:
-        logger.error(f"Error processing question: {e}")
-        # Fallback to original question if processing fails
-        input_data = {'question': user_question}
-        response = conversation_chain(input_data)
-        return {'text': response['answer']}
-
 
 
 @app.on_event("startup")
@@ -606,63 +530,6 @@ async def text_to_speech_api(request: Request):
         )
 
 # Update the synthesize_speech endpoint in your FastAPI server
-@app.post("/synthesize_speech")
-async def synthesize_speech_api(request: Request):
-    try:
-        data = await request.json()
-        text = data.get("text", "")
-        voice_name = data.get("voice", "en-US-Wavenet-D")
-        language_code = data.get("language_code", "en-US")
-        speaking_rate = data.get("speaking_rate", 1.0)
-
-        if not text:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Missing 'text' in request."}
-            )
-
-        url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_API_KEY}"
-        
-        payload = {
-            "input": {"text": text},
-            "voice": {
-                "languageCode": language_code,
-                "name": voice_name,
-            },
-            "audioConfig": {
-                "audioEncoding": "MP3",
-                "speakingRate": speaking_rate,
-            },
-        }
-
-        response = requests.post(url, json=payload)
-
-        if response.status_code == 200:
-            # Get the base64 encoded audio content
-            audio_content = response.json().get("audioContent")
-            if not audio_content:
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": "No audio content returned by TTS API."}
-                )
-
-            # Return the base64 audio content directly
-            return {
-                "status": "success",
-                "audioContent": audio_content  # This is already base64 encoded
-            }
-        else:
-            return JSONResponse(
-                status_code=response.status_code,
-                content={"error": response.text}
-            )
-
-    except Exception as e:
-        logger.error(f"Error in synthesize_speech: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
 
 # You can remove or comment out the StaticFiles mounting since we're not storing files anymore
 # app.mount("/data", StaticFiles(directory="data"), name="data")
