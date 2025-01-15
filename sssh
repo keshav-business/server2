@@ -1,0 +1,98 @@
+# Add this after the existing imports
+from typing import Dict, Tuple
+
+# Word mapping dictionary for speech recognition corrections
+WORD_MAPPINGS: Dict[str, str] = {
+    # Company and name variations
+    "ilish": "ilesh",
+    "irish": "ilesh",
+    "ellis": "ilesh",
+    "eubank": "ubik",
+    "ubique": "ubik",
+    "unique": "ubik",
+    "you bike": "ubik",
+    
+    # Common business terms
+    "solution": "solutions",
+    "internet": "internet",
+    "website": "website",
+    "software": "software",
+    
+    # Numbers and amounts
+    "too": "two",
+    "for": "four",
+    "won": "one",
+    
+    # Common phrases
+    "thanks": "thank you",
+    "okay": "ok",
+    "bye": "goodbye"
+}
+
+def apply_word_corrections(text: str) -> Tuple[str, list]:
+    """
+    Apply word corrections to transcribed text and track changes made.
+    
+    Args:
+        text: The original transcribed text
+        
+    Returns:
+        Tuple containing:
+        - Corrected text
+        - List of corrections made (original -> corrected)
+    """
+    words = text.lower().split()
+    corrections = []
+    corrected_words = []
+    
+    for word in words:
+        if word in WORD_MAPPINGS:
+            corrected = WORD_MAPPINGS[word]
+            corrections.append((word, corrected))
+            corrected_words.append(corrected)
+        else:
+            corrected_words.append(word)
+    
+    return ' '.join(corrected_words), corrections
+
+# Modify the handle_speech_to_text function to include corrections
+async def handle_speech_to_text(file: UploadFile):
+    if file is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "No file provided."}
+        )
+
+    webm_path = os.path.join("data", f"temp_{uuid.uuid4().hex}.webm")
+    
+    try:
+        content = await file.read()
+        with open(webm_path, "wb") as f:
+            f.write(content)
+
+        with open(webm_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        
+        # Apply word corrections
+        corrected_text, corrections = apply_word_corrections(transcript.text)
+        
+        return {
+            "status": "success",
+            "original_text": transcript.text,
+            "corrected_text": corrected_text,
+            "corrections": corrections
+        }
+
+    except Exception as e:
+        logger.error(f"Error in speech-to-text: {e}")
+        return {
+            "status": "error",
+            "error": "An error occurred during transcription."
+        }
+
+    finally:
+        if os.path.exists(webm_path):
+            os.remove(webm_path)
