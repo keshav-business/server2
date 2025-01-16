@@ -269,8 +269,7 @@ def initialize_global_vectorstore():
             os.path.join('data', "Ilesh Sir (IK) - Words.pdf"),
             os.path.join('data', "UBIK SOLUTION.pdf"),
             os.path.join('data', "illesh3.pdf"),
-            os.path.join('data', "website-data-ik.pdf"),
-            os.path.join('data', "prods1.pdf")
+            os.path.join('data', "website-data-ik.pdf")
         ]
 
         combined_text = ""
@@ -309,13 +308,34 @@ def handle_userinput(user_question: str, user_id: str):
         refinement_prompt = f"""
         The user provided the following input: "{input_text}"
 
+
         Context: The input may contain minor errors or variations due to inaccuracies in communication or understanding. something as huge as ehiglo considered as ethical law or igloo or tigloo so be lineant
         Your task is to:
         1. Interpret the user's intent.
         2. Refine the input to make it coherent and meaningful.
         3. Provide the refined version.
 
-        Refined Input:
+        
+
+        You are trained specifically about UBIK Solutions. Follow this exact decision tree when responding:
+
+        1. First, check if the question has any relevant context in the provided knowledge base:
+           - If you find context even with misspelled words → Proceed with answering
+
+        2. If no direct context match but the question seems relevant:
+           - If unclear word might affect the answer → Ask for spelling playfully
+           - Example: "Oh! I'd love to help with that! Could you spell out [unclear word]? Just want to make sure I give you the perfect answer! 😊"
+           
+        3. If the question seems relevant but unclear word isn't crucial:
+           - Proceed with answering based on best interpretation
+           - Example: Small grammatical errors or common word variations
+
+        4. If the question is completely irrelevant and u get no context along:
+           - Politely respond: "I'm specifically trained to help with questions about UBIK Solutions. This seems outside my expertise!"
+
+
+
+           Refined Input:
         """
         return conversation_chain({'question': refinement_prompt})['answer'].strip()
 
@@ -351,42 +371,24 @@ def create_or_refresh_user_chain(user_id: str):
         if global_vectorstore is None:
             return False, "Global vectorstore is not initialized."
 
+        # Create chat model with system message
         chat_llm = ChatOpenAI(model=MODEL_NAME, temperature=0.9)
 
-        # Enhanced condense template that preserves potentially unclear words
-        condense_template = """Given the conversation and follow-up question, rephrase it as a standalone question.
-        Keep any unclear words in their original form for context matching.
+        # Create custom QA prompt template that includes system message
+        condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
 
         Chat History:
         {chat_history}
         Follow Up Input: {question}
         Standalone question:"""
-        
         CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(condense_template)
 
-        # Enhanced QA template with context-aware clarification logic
         qa_template = f"""
         {user_state['system_message']}
 
-        You are trained specifically about Ilesh Sir and UBIK Solutions. Follow this exact decision tree when responding:
-
-        1. First, check if the question has any relevant context in the provided knowledge base:
-           - If you find context even with misspelled words → Proceed with answering
-
-        2. If no direct context match but the question seems relevant:
-           - If unclear word might affect the answer → Ask for spelling playfully
-           - Example: "Oh! I'd love to help with that! Could you spell out [unclear word]? Just want to make sure I give you the perfect answer! 😊"
-           
-        3. If the question seems relevant but unclear word isn't crucial:
-           - Proceed with answering based on best interpretation
-           - Example: Small grammatical errors or common word variations
-
-        4. If the question is completely irrelevant and u get no context along:
-           - Politely respond: "I'm specifically trained to help with questions about UBIK Solutions. This seems outside my expertise!"
-
-        Context: {context}
+        Context: {{context}}
         
-        Question: {question}
+        Question: {{question}}
         
         Answer: """
         
@@ -395,6 +397,7 @@ def create_or_refresh_user_chain(user_id: str):
             input_variables=["context", "question"]
         )
 
+        # Create the chain
         user_state['chain'] = ConversationalRetrievalChain.from_llm(
             llm=chat_llm,
             retriever=global_vectorstore.as_retriever(),
@@ -403,11 +406,20 @@ def create_or_refresh_user_chain(user_id: str):
             combine_docs_chain_kwargs={'prompt': QA_PROMPT}
         )
         
-        logger.info(f"New conversation chain created for user {user_id} with context-aware prompt template")
-        return True, "Conversation chain created with intelligent spelling clarification."
+        logger.info(f"New conversation chain created for user {user_id} with system message: {user_state['system_message']}")
+        return True, "Conversation chain created."
     else:
         return True, "Conversation chain already exists."
-    
+
+
+@app.on_event("startup")
+async def startup_event():
+    success, message = initialize_global_vectorstore()
+    if not success:
+        logger.error(f"Failed to initialize vectorstore: {message}")
+    else:
+        logger.info("Vectorstore initialized successfully on startup")
+
 @app.get("/")
 async def hello_root():
     return {
